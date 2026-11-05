@@ -1,0 +1,347 @@
+---
+title: "Lab 9: OSM and Interactive Web Maps"
+output: html_document
+---
+
+**Xiaofan Liang**
+**Created in 2024; Updated in 2026**
+
+## Learning Objectives
+By the end of this practical lab you will be able to:
+
+* Retrieve and process OpenStreetMap (OSM) data with `osmdata`
+* Work with OSM features as `sf` objects
+* Visualize OSM data as a multi-layer interactive map with `leaflet`
+* Export a `leaflet` map as a static HTML file you can open in any browser
+* Host the map on GitHub Pages so anyone can view it with a link
+
+**CHEATSHEETS!** You are encouraged to download RStudio Cheatsheets. You can find them on RStudio website [here](https://posit.co/resources/cheatsheets/?type=posit-cheatsheets/), or a comprehensive list (more than what has been listed) [here](https://github.com/rstudio/cheatsheets/). For example, here you can find [base R syntax](https://rstudio.github.io/cheatsheets/base-r.pdf), [dplyr](https://rstudio.github.io/cheatsheets/data-transformation.pdf), [sf](https://github.com/rstudio/cheatsheets/blob/main/sf.pdf), and [leaflet](https://ugoproto.github.io/ugo_r_doc/pdf/leaflet-cheat-sheet.pdf).
+
+Functions                     | Package     | Task
+-------------------------------|-------------|------------------------------------------------------------------
+`getbb()`                      | osmdata     | Retrieve a place boundary by place name (returns a bounding box)
+`opq()`                        | osmdata     | Build an Overpass query from a bounding box
+`add_osm_feature()`            | osmdata     | Add a single key-value tag to an Overpass query
+`add_osm_features()`           | osmdata     | Add several key-value tags to an Overpass query in one call
+`osmdata_sf()`                 | osmdata     | Run an Overpass query and return the result as `sf` objects
+`st_make_valid()`              | sf          | Repair invalid geometries before mapping or spatial analysis
+`leaflet()`                    | leaflet     | Initialize a Leaflet map
+`addTiles()`                   | leaflet     | Add a basemap tile layer (default OSM, or a custom `urlTemplate`)
+`addPolygons()` / `addPolylines()` / `addCircleMarkers()` | leaflet | Add polygon / line / point layers to a map
+`addLegend()`                  | leaflet     | Add a legend for a data variable
+`addLayersControl()`           | leaflet     | Add controls for turning map layers on and off
+`saveWidget()`                 | htmlwidgets | Export a leaflet map as a standalone HTML file
+
+For **Python** users, `OSMnx` and `Folium` provide the same OSM-retrieval-and-interactive-mapping workflow shown in this lab.
+
+`osmdata` queries OpenStreetMap features directly from the Overpass API using a place name or bounding box, and returns them as `sf` objects. `leaflet` builds interactive Leaflet.js web maps from those `sf` objects and exports them as standalone HTML, which makes them easy to host on a static site like GitHub Pages.
+
+## Setting Environment, Libraries, and Data
+
+Install the Lab 9 packages (once):
+```{r eval=FALSE}
+install.packages(c('osmdata', 'leaflet', 'htmlwidgets'))
+```
+
+```{r message=FALSE}
+#replace my path with yours to the Lab 9 folder
+setwd("/Users/xfliang/University of Michigan Dropbox/Xiaofan Liang/UM_Teaching/URP535_Urban_Informatics/F26/Lab/Lab9/")
+
+library(tidyverse)
+library(sf)
+library(osmdata)     # queries OpenStreetMap features from the Overpass API
+library(leaflet)     # builds interactive Leaflet web maps
+library(htmlwidgets) # exports a leaflet map as a standalone HTML file
+```
+
+This lab queries OpenStreetMap data live for the University of Michigan North Campus area -- no local data files are needed.
+
+## Retrieve OSM Data on UMich North Campus
+
+OSM data has three geometry types: **Node**, **Way**, and **Relation**. A node can be a point of interest, but it can also be a vertex that forms the geometry of a polygon. A way can be a line or polygon, such as a road or building. A relation is a collection of nodes, ways, and other relations, such as a bus line or administrative boundary. In this lab, we mostly work with nodes and ways.
+
+There are two steps for downloading OSM data:
+
+1. Determine the **bounding box** for the download.
+2. Tell OSM what **features** (key-value tags) you want -- amenities, roads, buildings -- and convert the result into `sf` objects.
+
+### Step 1: Determine the Bounding Box
+
+An OSM query starts with a bounding box. `getbb()` uses the free Nominatim API provided by OpenStreetMap to find the bounding box associated with a place name. It is recommended to double-check the returned bounding box, because many places share similar names.
+
+```{r}
+getbb("Ann Arbor, Michigan, USA")
+getbb("University of Michigan, Ann Arbor, Michigan, USA")
+```
+
+Note: If getbb() returns the error `'curl_modify_url' is not an exported object from 'namespace:curl'`, your installed curl package is likely outdated. The required function was introduced in curl version 6.3.0. To resolve this, update the package using `install.packages("curl")`. If R asks `"Do you want to install from sources the packages which need compilation?"`, select Yes. This installs a newer version that your computer needs to compile, which may require additional tools (Rtools on Windows or Xcode Command Line Tools on macOS). 
+
+After installation, restart your R session and verify that the function is available:
+
+`"curl_modify_url" %in% getNamespaceExports("curl")`
+
+If this returns `TRUE`, retry the `getbb` commands. If the installation process fails, seek support from the GSI.
+
+
+You can also supply four coordinates directly as `c(xmin, ymin, xmax, ymax)`. You can get `xmin`/`ymin` by clicking the bottom-left corner of your area of interest in Google Maps (or another map interface), and `xmax`/`ymax` from the top-right corner. Since "North Campus" isn't a well-defined place name in OSM, we use a numeric bounding box for it instead.
+
+```{r}
+# Roughly the bottom-left and top-right corners of UM North Campus.
+bbox <- c(-83.725706, 42.287305, -83.704518, 42.302508)
+bbox
+```
+
+### Step 2: Add OSM Features and Convert to `sf` Objects
+
+OSM features are stored as **key-value** (or **feature-value**) pairs. To retrieve restaurants, you'd use `key='amenity'`, `value='restaurant'`. `add_osm_feature()` adds a single key-value pair to a query; `add_osm_features()` adds several at once. Without a `value`, `osmdata` retrieves **all** values under that key.
+
+**How do you find out what key-value pairs exist?**
+
+- The [OSM Wiki Map Features page](https://wiki.openstreetmap.org/wiki/Map_features) covers most commonly used pairs, with definitions for each.
+- `available_features()` and `available_tags()` in `osmdata` cover the same information as the Map Features page.
+- [Taginfo](https://taginfo.openstreetmap.org/) shows how many instances of a key-value pair exist -- useful for checking whether a tag is common enough, or is only used in a specific local context.
+- Google your interest together with "OSM." Searching "restaurant in OSM" turns up the [amenity=restaurant](https://wiki.openstreetmap.org/wiki/Tag:amenity%3Drestaurant) page directly.
+
+We retrieve three layers this way: **buildings**, **roads**, and **amenities**.
+
+#### Buildings
+
+`key = 'building'` retrieves every building-tagged feature. The result comes back split across `osm_points`, `osm_lines`, and `osm_polygons` (a node may carry building-related tags even though the polygon is what we want), so we keep only `osm_polygons`. OSM polygons occasionally have minor topology errors (such as not closing correctly); `st_make_valid()` from `sf` repairs those before mapping. We also drop down to just the `geometry` column -- OSM features come back with dozens of tag columns we don't need for this map, and keeping them increases the size of the exported file.
+
+```{r}
+building <- opq(bbox = bbox) %>% 
+  add_osm_feature(key = 'building') %>%
+  osmdata_sf()
+
+building
+
+# Keep only the polygons, fix any invalid geometries, and drop down to just geometry.
+building_polygons <- building$osm_polygons %>%
+  st_make_valid() %>%
+  select(geometry)
+
+nrow(building_polygons)
+head(building_polygons)
+```
+
+#### Roads
+
+Roads are stored under the `highway` key. In OSM, `highway` covers all road-like features -- residential streets, service roads, footways, cycleways, paths -- not just highways in the everyday sense. `key = 'highway'` retrieves all of them; we keep `osm_lines` and, again, trim to just the columns the map actually uses.
+
+```{r}
+roads <- opq(bbox = bbox) %>%
+  add_osm_feature(key = 'highway') %>%
+  osmdata_sf()
+
+roads_lines <- roads$osm_lines %>% select(highway, geometry)
+
+nrow(roads_lines)
+head(roads_lines)
+```
+
+#### Amenities
+
+We retrieve several food-and-drink amenity types in one query with `add_osm_features()`, then keep point geometries. A few amenities are mapped as building polygons rather than points (e.g. a whole food court); `st_centroid()` converts those to points so they can join the same layer -- you may see a warning that attributes are assumed constant over each geometry, which is safe to ignore since we only keep the resulting point location. Many OSM points are missing a `name`, which would leave the map's popup blank. We drop those here to keep the demo map focused on labeled points, though in a real analysis you'd usually keep unnamed points too.
+
+```{r}
+amenity <- opq(bbox = bbox) %>%
+  add_osm_features(features = c(
+    "amenity" = "restaurant",
+    "amenity" = "bar",
+    "amenity" = "biergarten",
+    "amenity" = "fast_food",
+    "amenity" = "food_court",
+    "amenity" = "cafe",
+    "amenity" = "pub",
+    "amenity" = "ice_cream"
+  )) %>%
+  osmdata_sf()
+
+# Convert polygon amenities to centroids before combining with the point amenities.
+amenity_points <- amenity$osm_points
+amenity_polys <- bind_rows(
+        amenity$osm_polygons,
+        amenity$osm_multipolygons
+    ) %>%
+    st_centroid()
+
+# Combine points and centroids, keep only the relevant columns, and drop entries
+# missing a name (so only named places remain).
+amenity_point <- bind_rows(amenity_points, amenity_polys) %>%
+  select(name, amenity, geometry) %>%
+  drop_na(name, amenity)
+
+nrow(amenity_point)
+table(amenity_point$amenity)
+head(amenity_point)
+```
+
+## Visualize OSM Data
+
+`leaflet` is aimed at *interactive* web maps: popups, pan/zoom, a shareable HTML file. `tmap`/`ggplot2` (used throughout earlier labs) are the usual choice for *static*, publication-quality figures. A single `leaflet()` + `addTiles()` + `addCircleMarkers()` chain is a fast way to get a quick interactive look before you invest in custom styling.
+
+```{r}
+# Fastest possible interactive preview.
+leaflet(data = amenity_point) %>%
+  addTiles() %>%
+  addCircleMarkers()
+```
+
+### Get a Free CARTO API Key
+
+CARTO's basemap tiles (used below for their light, low-contrast look) now require a free API key -- unauthenticated requests come back with a visible "API KEY REQUIRED" watermark across the map. This includes leaflet's built-in `providers$CartoDB.Positron`, since it points at the same CARTO tile servers. Getting a key is quick and does **not** require creating a CARTO account:
+
+1. Go to [carto.com/basemaps/apikey](https://carto.com/basemaps/apikey).
+2. Fill out the short form: your email, the domain where you'll host the map (your GitHub Pages domain is fine, e.g. `your-username.github.io`), and a one-line project description (e.g. "class assignment").
+3. CARTO emails you a key, usually within a few minutes. The free tier covers 5 million tile requests/month -- far more than this lab needs.
+4. Paste your key into `CARTO_API_KEY` below.
+
+**Why CARTO and not Mapbox?** Mapbox also issues free API tokens, and token creation there is instant (no email wait at all) -- but Mapbox requires a credit card on file to unlock its free tier, even if you're never charged. CARTO's signup needs no card. For a whole class getting a key, that's worth more than saving a few minutes.
+
+```{r}
+# Replace with your own key from carto.com/basemaps/apikey
+CARTO_API_KEY <- 'YOUR_KEY_HERE'
+```
+
+### Build the Full Map
+
+`leaflet()` builds a map object that you keep adding layers to with the pipe. We chain three layers onto one map, each tagged with a `group=` name so `addLayersControl()` can toggle them independently:
+
+- **buildings** -- solid dark grey polygons, added with `addPolygons()`
+- **roads** -- black lines, added with `addPolylines()`
+- **amenities** -- circle markers colored by the `amenity` column, added with `addCircleMarkers()`, plus a popup showing the name and type
+
+```{r}
+# CartoDB Positron: the {z}/{x}/{y}/{r} placeholders are filled in by Leaflet.js itself
+# at render time, not by R, so they stay as plain text here -- only the API key is
+# substituted.
+tile_url <- paste0('https://{s}.basemaps.cartocdn.com/light_all/{z}/{x}/{y}{r}.png?key=', CARTO_API_KEY)
+
+# required attribution for using the map tiles
+map_attr <- '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors &copy; <a href="https://carto.com/attributions">CARTO</a>'
+
+# Assign one color per amenity type for the circle markers and legend.
+amenity_colors <- c(
+  "restaurant" = "red",
+  "fast_food" = "blue",
+  "cafe" = "darkgreen"
+)
+
+m <- leaflet(data = amenity_point) %>%
+  # Basemap: a custom urlTemplate takes the place of addProviderTiles() so the API
+  # key can be inserted. Leaving group unset here keeps the basemap out of the
+  # layer control below.
+  addTiles(urlTemplate = tile_url, attribution = map_attr) %>%
+  # Buildings: solid dark grey polygons with no border.
+  addPolygons(
+    data = building_polygons,
+    fillColor = 'darkgrey',
+    color = NA,
+    fillOpacity = 0.8,
+    group = 'buildings'
+  ) %>%
+  # Roads: black lines.
+  addPolylines(
+    data = roads_lines,
+    color = 'black',
+    weight = 1.5,
+    opacity = 0.7,
+    group = 'roads'
+  ) %>%
+  # Amenities: colored by amenity type, with a popup showing the name and type.
+  addCircleMarkers(
+    lng = st_coordinates(amenity_point)[,1],
+    lat = st_coordinates(amenity_point)[,2],
+    popup = ~paste0("<b>", name, "</b><br>", amenity),
+    radius = 5,
+    color = ~unname(amenity_colors[amenity]),
+    fillOpacity = 0.8,
+    group = 'amenities'
+  ) %>%
+  addLegend(
+    "bottomright",
+    colors = amenity_colors,
+    labels = names(amenity_colors),
+    title = "Amenity Type",
+    opacity = 1
+  ) %>%
+  # Let users toggle the buildings, roads, and amenities layers independently.
+  addLayersControl(
+    overlayGroups = c('buildings', 'roads', 'amenities'),
+    options = layersControlOptions(collapsed = FALSE)
+  )
+
+m
+```
+
+Zoom, pan, and click markers to open popups. Use the layer control (top right) to toggle buildings, roads, and amenities.
+
+Leaflet can do much more than this! Explore the package's [Articles](https://rstudio.github.io/leaflet/) for many more powerful examples, such as:
+
+- [Choropleths](https://rstudio.github.io/leaflet/articles/choropleths.html): color polygons or regions by a data variable (e.g. population density, rates, etc.)
+- [Markers](https://rstudio.github.io/leaflet/articles/markers.html): custom icons and marker clustering
+- [Popups and Labels](https://rstudio.github.io/leaflet/articles/popups.html): standalone popups and hover labels beyond what's shown above
+- [Raster Images](https://rstudio.github.io/leaflet/articles/raster.html): overlay raster/image data on the map
+- [Show/Hide Layers](https://rstudio.github.io/leaflet/articles/showhide.html): programmatically or interactively control which layers are visible
+- [Using Leaflet with Shiny](https://rstudio.github.io/leaflet/articles/shiny.html): build fully interactive apps with dropdown filters, dynamic updates, and more
+
+You'll find many quick examples and patterns in the documentation!
+
+## Export and Host on GitHub Pages
+
+`saveWidget()` writes a standalone HTML file. Use `selfcontained = TRUE` so all JavaScript and CSS are embedded in one file, which works well for GitHub Pages. If you double-click on the file exported in your local folder, you can see and interact with it in your browser. This is a local copy, meaning that you can see it, but you cannot share a link for others to see. To make it sharable, you will have to host it online and we recommend **GitHub Pages** because it provides free hosting service.
+
+```{r}
+# html_file <- 'lab9_map.html'
+# saveWidget(m, file = html_file, selfcontained = TRUE)
+```
+
+### Step 1: Create a GitHub repository
+
+1. Log in to [GitHub](https://github.com) and click **New repository**.
+2. Choose a name (e.g. `lab9-osm-map`), set visibility to **Public**, and create the repo.
+
+### Step 2: Add your HTML file and enable GitHub Pages
+
+**Option A -- upload in the browser**
+
+1. In the repo, under the **Quick setup** ssection click the **upload an existing file** link and drag `lab9_map.html` into the upload box that opens.
+2. Commit.
+3. **Settings** -> **Pages** -> **Deploy from a branch** -> branch **main**, folder **/ (root)** -> Save.
+4. After a short wait, open `https://<your-username>.github.io/<repo-name>/lab9_map.html`.
+
+**Option B -- Git from your computer**
+
+```bash
+cd "PATH TO YOUR CURRENT LAB FOLDER"
+git clone https://github.com/your-username/lab9-osm-map.git
+cd lab9-osm-map
+# manually copy lab9_map.html into this folder, then type the following commands
+git add lab9_map.html
+git commit -m "Add leaflet map"
+git push origin main
+```
+
+Then enable Pages as in Option A.
+
+### Step 3: Share the link
+
+Use `https://<your-username>.github.io/<repo-name>/lab9_map.html` in assignments. **Tip:** rename the file to `index.html` in the repo root if you want the map at `https://<your-username>.github.io/<repo-name>/` with no filename.
+
+## Practice Questions
+
+### Q1: Retrieve a new OSM feature
+
+Choose another OSM feature on North Campus -- bicycle parking, bus stops, parking lots, benches, or another amenity -- and retrieve it with `add_osm_feature()`/`add_osm_features()`, following the same two-step process as above (the `bbox` from Step 1 still applies). Use the OSM Wiki or Taginfo to find the right key-value pair.
+
+### Q2: Add it to the map
+
+Add the new feature to the map above as another layer with its own `group=` name (besides amenities, roads, and buildings). Give it a color distinct from the amenities layer, and a tooltip or popup showing at least one useful attribute. Make sure it shows up as a new legend item and its own entry in `addLayersControl()`, and keep all other map aesthetics (e.g. legend style, basemap style, etc.) the same.
+
+### Q3: Export and host
+
+Export your updated map as an HTML file, host it on GitHub Pages, and submit the public URL for the quiz.
+
+## Additional Resources
+
+[osmdata documentation](https://docs.ropensci.org/osmdata/), [leaflet for R documentation](https://rstudio.github.io/leaflet/), [sf documentation](https://r-spatial.github.io/sf/), [OSM Wiki Map Features](https://wiki.openstreetmap.org/wiki/Map_features), [Taginfo](https://taginfo.openstreetmap.org/), and [Leaflet Providers Preview](https://leaflet-extras.github.io/leaflet-providers/preview/).
